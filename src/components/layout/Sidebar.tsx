@@ -1,7 +1,7 @@
-import { Calculator, ArrowLeftRight, GitCompare, Calendar } from 'lucide-react';
+import { Calculator, ArrowLeftRight, GitCompare, Calendar, Users } from 'lucide-react';
 import clsx from 'clsx';
 
-export type PageType = 'forward' | 'reverse' | 'compare' | 'annual';
+export type PageType = 'forward' | 'reverse' | 'compare' | 'annual' | 'batch';
 
 interface SidebarProps {
   currentPage: PageType;
@@ -13,6 +13,7 @@ const navItems = [
   { id: 'reverse' as const, label: '反向推算', icon: ArrowLeftRight },
   { id: 'compare' as const, label: '对比分析', icon: GitCompare },
   { id: 'annual' as const, label: '年度汇算', icon: Calendar },
+  { id: 'batch' as const, label: '批量计算', icon: Users },
 ];
 
 export default function Sidebar({ currentPage, onNavigate }: SidebarProps) {

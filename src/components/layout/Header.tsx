@@ -7,6 +7,7 @@ const pageTitles: Record<PageType, string> = {
   reverse: '反向推算',
   compare: '对比分析',
   annual: '年度汇算',
+  batch: '批量计算',
 };
 
 interface HeaderProps {

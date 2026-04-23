@@ -1,8 +1,12 @@
 pub mod tax_engine;
 
 use tax_engine::{
+    // 单人计算相关类型与函数
     CumulativeResponse, GeneralResponse, AnnualSettlementResult,
     compute_cumulative, compute_general, reverse_compute, compute_annual_settlement,
+    // 批量计算相关类型与函数
+    BatchCalculationResponse, PersonIncome,
+    compute_batch, parse_batch_csv,
 };
 
 #[tauri::command]
@@ -30,6 +34,18 @@ fn calculate_annual_settlement(
     compute_annual_settlement(total_gross_income, special_deductions, special_additional_deductions, other_deductions)
 }
 
+// 批量计算命令
+#[tauri::command]
+fn calculate_batch(persons: Vec<PersonIncome>) -> Result<BatchCalculationResponse, String> {
+    compute_batch(persons)
+}
+
+// CSV导入命令
+#[tauri::command]
+fn import_batch_csv(csv_content: String) -> Result<Vec<PersonIncome>, String> {
+    parse_batch_csv(&csv_content)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -39,6 +55,8 @@ pub fn run() {
             calculate_general,
             reverse_calculate,
             calculate_annual_settlement,
+            calculate_batch,
+            import_batch_csv,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

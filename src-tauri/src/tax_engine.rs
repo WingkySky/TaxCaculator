@@ -97,6 +97,50 @@ pub struct GeneralResponse {
     pub average_tax_rate: f64,
 }
 
+// ===== 多人批量计算数据结构 =====
+
+/// 单人收入信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonIncome {
+    pub name: String,
+    pub monthly_incomes: Vec<f64>,
+}
+
+/// 批量计算请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchCalculationRequest {
+    pub persons: Vec<PersonIncome>,
+}
+
+/// 单人月度计算结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonMonthlyResult {
+    pub name: String,
+    pub results: Vec<MonthlyResult>,
+}
+
+/// 单人汇总信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonSummary {
+    pub name: String,
+    pub total_gross_income: f64,
+    pub total_tax: f64,
+    pub total_net_income: f64,
+    pub average_tax_rate: f64,
+}
+
+/// 批量计算响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchCalculationResponse {
+    pub person_results: Vec<PersonMonthlyResult>,
+    pub person_summaries: Vec<PersonSummary>,
+    pub total_persons: i32,
+    pub total_gross_income: f64,
+    pub total_tax: f64,
+    pub total_net_income: f64,
+    pub average_tax_rate: f64,
+}
+
 pub fn compute_cumulative(monthly_incomes: Vec<f64>) -> Result<CumulativeResponse, String> {
     if monthly_incomes.is_empty() {
         return Err("收入数据不能为空".to_string());
@@ -304,6 +348,148 @@ fn compute_cumulative_withheld(total_gross_income: f64) -> f64 {
     }
 }
 
+// ===== 多人批量计算功能 =====
+
+/// 多人批量计算：对每名人员独立调用累计预扣法，汇总全局结果
+pub fn compute_batch(persons: Vec<PersonIncome>) -> Result<BatchCalculationResponse, String> {
+    // 校验：人员列表不能为空
+    if persons.is_empty() {
+        return Err("人员列表不能为空".to_string());
+    }
+
+    // 校验：姓名不能为空
+    for (i, p) in persons.iter().enumerate() {
+        if p.name.trim().is_empty() {
+            return Err(format!("第{}位人员姓名不能为空", i + 1));
+        }
+    }
+
+    // 校验：姓名不能重复
+    let mut names = std::collections::HashSet::new();
+    for (i, p) in persons.iter().enumerate() {
+        if !names.insert(p.name.clone()) {
+            return Err(format!("第{}位人员姓名\"{}\"重复", i + 1, p.name));
+        }
+    }
+
+    let mut person_results = Vec::new();
+    let mut person_summaries = Vec::new();
+
+    // 逐人计算
+    for person in &persons {
+        let resp = compute_cumulative(person.monthly_incomes.clone())?;
+
+        person_results.push(PersonMonthlyResult {
+            name: person.name.clone(),
+            results: resp.monthly_results.clone(),
+        });
+
+        person_summaries.push(PersonSummary {
+            name: person.name.clone(),
+            total_gross_income: resp.total_gross_income,
+            total_tax: resp.total_tax,
+            total_net_income: resp.total_net_income,
+            average_tax_rate: resp.average_tax_rate,
+        });
+    }
+
+    // 全局汇总
+    let total_persons = person_summaries.len() as i32;
+    let total_gross_income: f64 = person_summaries.iter().map(|s| s.total_gross_income).sum();
+    let total_tax: f64 = person_summaries.iter().map(|s| s.total_tax).sum();
+    let total_net_income: f64 = person_summaries.iter().map(|s| s.total_net_income).sum();
+    let average_tax_rate = if total_gross_income > 0.0 {
+        total_tax / total_gross_income
+    } else {
+        0.0
+    };
+
+    Ok(BatchCalculationResponse {
+        person_results,
+        person_summaries,
+        total_persons,
+        total_gross_income,
+        total_tax,
+        total_net_income,
+        average_tax_rate,
+    })
+}
+
+/// 解析批量CSV：格式为"姓名,1月,2月,...,12月"，每行一名人员
+pub fn parse_batch_csv(csv_content: &str) -> Result<Vec<PersonIncome>, String> {
+    // 去除 UTF-8 BOM
+    let content = csv_content.strip_suffix("\u{FEFF}").unwrap_or(csv_content);
+    let content = content.strip_prefix("\u{FEFF}").unwrap_or(content);
+
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return Err("CSV内容不能为空".to_string());
+    }
+
+    // 跳过表头行
+    let data_lines = &lines[1..];
+    if data_lines.is_empty() {
+        return Err("CSV没有数据行".to_string());
+    }
+
+    let mut persons = Vec::new();
+    let mut names = std::collections::HashSet::new();
+
+    for (idx, line) in data_lines.iter().enumerate() {
+        let line_num = idx + 2; // 行号从2开始（1为表头）
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.is_empty() {
+            return Err(format!("第{}行：数据格式错误", line_num));
+        }
+
+        // 校验：姓名不为空
+        let name = fields[0].trim().to_string();
+        if name.is_empty() {
+            return Err(format!("第{}行：姓名不能为空", line_num));
+        }
+
+        // 校验：姓名不重复
+        if !names.insert(name.clone()) {
+            return Err(format!("第{}行：姓名\"{}\"重复", line_num, name));
+        }
+
+        // 解析各月份收入
+        let mut monthly_incomes = Vec::new();
+        for (m, field) in fields[1..].iter().enumerate() {
+            let trimmed = field.trim();
+            if trimmed.is_empty() || trimmed == "0" {
+                monthly_incomes.push(0.0);
+            } else {
+                match trimmed.parse::<f64>() {
+                    Ok(val) => {
+                        // 校验：金额不为负数
+                        if val < 0.0 {
+                            return Err(format!("第{}行：第{}月金额不能为负数", line_num, m + 1));
+                        }
+                        monthly_incomes.push(val);
+                    }
+                    Err(_) => {
+                        return Err(format!("第{}行：第{}月金额格式错误\"{}\"", line_num, m + 1, trimmed));
+                    }
+                }
+            }
+        }
+
+        persons.push(PersonIncome { name, monthly_incomes });
+    }
+
+    if persons.is_empty() {
+        return Err("CSV没有有效数据行".to_string());
+    }
+
+    Ok(persons)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +565,148 @@ mod tests {
         let cum_ded = 5000.0;
         let expected_taxable = 50000.0 - cum_fee - cum_ded;
         assert!((r.taxable_income - expected_taxable).abs() < 0.01);
+    }
+
+    // ===== 多人批量计算测试 =====
+
+    #[test]
+    fn test_batch_basic() {
+        // 基本多人计算测试（2人，每人2-3月收入）
+        let persons = vec![
+            PersonIncome { name: "张三".to_string(), monthly_incomes: vec![10000.0, 10000.0] },
+            PersonIncome { name: "李四".to_string(), monthly_incomes: vec![8000.0, 8000.0, 8000.0] },
+        ];
+        let result = compute_batch(persons).unwrap();
+
+        // 验证总人数
+        assert_eq!(result.total_persons, 2);
+        // 验证每人都有结果
+        assert_eq!(result.person_results.len(), 2);
+        assert_eq!(result.person_summaries.len(), 2);
+
+        // 验证张三2个月、李四3个月
+        assert_eq!(result.person_results[0].results.len(), 2);
+        assert_eq!(result.person_results[1].results.len(), 3);
+
+        // 验证全局汇总：总收入 = 20000 + 24000 = 44000
+        assert!((result.total_gross_income - 44000.0).abs() < 0.01);
+        // 验证全局总税额 > 0
+        assert!(result.total_tax > 0.0);
+        // 验证全局总税后收入 = 总收入 - 总税额
+        assert!((result.total_net_income - (result.total_gross_income - result.total_tax)).abs() < 0.01);
+        // 验证平均税率
+        let expected_avg_rate = result.total_tax / result.total_gross_income;
+        assert!((result.average_tax_rate - expected_avg_rate).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_batch_independent() {
+        // 验证不同人员计算结果互不影响
+        let persons = vec![
+            PersonIncome { name: "甲".to_string(), monthly_incomes: vec![50000.0] },
+            PersonIncome { name: "乙".to_string(), monthly_incomes: vec![10000.0] },
+        ];
+        let result = compute_batch(persons).unwrap();
+
+        // 甲单独计算
+        let a_single = compute_cumulative(vec![50000.0]).unwrap();
+        // 乙单独计算
+        let b_single = compute_cumulative(vec![10000.0]).unwrap();
+
+        // 验证甲的月度结果与单独计算一致
+        let a_result = &result.person_results[0];
+        assert!((a_result.results[0].monthly_tax - a_single.monthly_results[0].monthly_tax).abs() < 0.01);
+        assert!((a_result.results[0].net_income - a_single.monthly_results[0].net_income).abs() < 0.01);
+
+        // 验证乙的月度结果与单独计算一致
+        let b_result = &result.person_results[1];
+        assert!((b_result.results[0].monthly_tax - b_single.monthly_results[0].monthly_tax).abs() < 0.01);
+        assert!((b_result.results[0].net_income - b_single.monthly_results[0].net_income).abs() < 0.01);
+
+        // 验证甲乙税额不同（高收入者税额更高）
+        assert!(a_result.results[0].monthly_tax > b_result.results[0].monthly_tax);
+    }
+
+    #[test]
+    fn test_batch_cross_month() {
+        // 验证跨月累计正确性
+        let persons = vec![
+            PersonIncome { name: "王五".to_string(), monthly_incomes: vec![10000.0, 20000.0, 30000.0] },
+        ];
+        let result = compute_batch(persons).unwrap();
+
+        // 与单独调用 compute_cumulative 结果一致
+        let single = compute_cumulative(vec![10000.0, 20000.0, 30000.0]).unwrap();
+
+        for (i, r) in result.person_results[0].results.iter().enumerate() {
+            assert!((r.monthly_tax - single.monthly_results[i].monthly_tax).abs() < 0.01,
+                "第{}月税额不一致", i + 1);
+            assert!((r.cumulative_income - single.monthly_results[i].cumulative_income).abs() < 0.01,
+                "第{}月累计收入不一致", i + 1);
+        }
+
+        // 验证汇总一致
+        let summary = &result.person_summaries[0];
+        assert!((summary.total_gross_income - single.total_gross_income).abs() < 0.01);
+        assert!((summary.total_tax - single.total_tax).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_csv_basic() {
+        // 基本 CSV 解析测试
+        let csv = "姓名,1月,2月,3月,4月,5月,6月,7月,8月,9月,10月,11月,12月\n\
+                   张三,10000,10000,10000,,,,,,,\n\
+                   李四,8000,8000,8000,8000,,,,,,,\n";
+        let persons = parse_batch_csv(csv).unwrap();
+
+        assert_eq!(persons.len(), 2);
+        assert_eq!(persons[0].name, "张三");
+        assert_eq!(persons[0].monthly_incomes.len(), 10); // 3个有值 + 7个空值=0
+        assert!((persons[0].monthly_incomes[0] - 10000.0).abs() < 0.01);
+        assert!((persons[0].monthly_incomes[3] - 0.0).abs() < 0.01);
+
+        assert_eq!(persons[1].name, "李四");
+        assert!((persons[1].monthly_incomes[0] - 8000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_csv_validation() {
+        // 校验：空姓名
+        let csv = "姓名,1月,2月\n,10000,10000\n";
+        let result = parse_batch_csv(csv);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("姓名不能为空"));
+
+        // 校验：重复姓名
+        let csv = "姓名,1月,2月\n张三,10000,10000\n张三,8000,8000\n";
+        let result = parse_batch_csv(csv);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("重复"));
+
+        // 校验：负数金额
+        let csv = "姓名,1月,2月\n张三,-1000,10000\n";
+        let result = parse_batch_csv(csv);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("负数"));
+
+        // 校验：空人员列表
+        let result = compute_batch(vec![]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("人员列表不能为空"));
+
+        // 校验：空姓名（compute_batch层面）
+        let persons = vec![PersonIncome { name: "  ".to_string(), monthly_incomes: vec![10000.0] }];
+        let result = compute_batch(persons);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("姓名不能为空"));
+
+        // 校验：重复姓名（compute_batch层面）
+        let persons = vec![
+            PersonIncome { name: "张三".to_string(), monthly_incomes: vec![10000.0] },
+            PersonIncome { name: "张三".to_string(), monthly_incomes: vec![8000.0] },
+        ];
+        let result = compute_batch(persons);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("重复"));
     }
 }
